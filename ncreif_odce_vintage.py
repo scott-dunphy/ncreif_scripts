@@ -146,6 +146,9 @@ class NCREIFClient:
         # Applies to every request made through this session.
         self.session.verify = VERIFY_SSL
         self._last_call = 0.0
+        # Every query's exact-as-returned rows, kept for the Raw_Data output tab:
+        # list of (label, DataFrame straight off the wire, no derived columns).
+        self.raw_log: list[tuple[str, pd.DataFrame]] = []
 
     def login(self) -> None:
         resp = self.session.post(
@@ -170,6 +173,7 @@ class NCREIFClient:
         where: str,
         groupby: str = "Year, YYYYQ",
         query_data: int = 0,
+        label: str = "",
     ) -> pd.DataFrame:
         if self.token is None:
             self.login()
@@ -207,6 +211,8 @@ class NCREIFClient:
         rows = resp.json().get("rows", [])
         records = [{f["name"]: f["value"] for f in row["fields"]} for row in rows]
         df = pd.DataFrame(records)
+        if not df.empty:
+            self.raw_log.append((label or where, df.copy()))
         return _coerce_numeric(df)
 
 
@@ -300,6 +306,7 @@ def pull_by_property_type(
         select=SELECT_MAIN,
         where=BASE_WHERE + period_clause(start, end),
         groupby=GROUPBY_MAIN,
+        label="vintage_by_property_type",
     )
     if df.empty:
         return df
@@ -345,6 +352,7 @@ def pull_vintage_buckets(
             ),
             where=f"{BASE_WHERE}{period_clause(start, end)} AND {clause}",
             groupby=GROUPBY_MAIN,
+            label=f"band_{label}",
         )
         if part.empty:
             continue
@@ -505,6 +513,13 @@ def main() -> int:
 
     out_path = os.path.abspath(out)
     if out.endswith(".xlsx"):
+        # Every API response exactly as returned, stacked, tagged by source query --
+        # no rounding, no derived columns.
+        raw_df = pd.concat(
+            [df.assign(Query=label) for label, df in client.raw_log],
+            ignore_index=True,
+        ) if client.raw_log else pd.DataFrame()
+
         with pd.ExcelWriter(out_path, engine="openpyxl") as xw:
             latest_quarter_pivot(main_df).to_excel(xw, sheet_name="Latest_Snapshot")
             main_df.to_excel(xw, sheet_name="By_PropertyType", index=False)
@@ -515,6 +530,9 @@ def main() -> int:
                     columns="Vintage_Band",
                     values="Pct_of_Type_MV_at_Share",
                 ).to_excel(xw, sheet_name="Band_Pct_by_Quarter")
+            if not raw_df.empty:
+                cols = ["Query"] + [c for c in raw_df.columns if c != "Query"]
+                raw_df[cols].to_excel(xw, sheet_name="Raw_Data", index=False)
     else:
         main_df.to_csv(out_path, index=False)
     print(f"\nWrote {out_path}")
