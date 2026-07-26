@@ -1,0 +1,4 @@
+# NCREIF query scripts -- runtime dependencies
+requests>=2.31
+pandas>=2.0
+openpyxl>=3.1   # only needed for --out *.xlsx
