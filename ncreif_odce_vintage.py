@@ -380,6 +380,35 @@ def pull_banded(
     return out.sort_values(["YYYYQ", PT_FIELD, "Vintage_Band"]).reset_index(drop=True)
 
 
+# Gateway markets: Los Angeles, Washington DC, Boston, New York, San Francisco,
+# Chicago -- tagged at the metro level, so each gateway includes its CBSA divisions.
+# Exact CBSAName strings as returned by the API (2020-census division names);
+# everything else is Non-Gateway. Edit this list to change the definition.
+GATEWAY_CBSANAMES = {
+    # Los Angeles (incl. Orange County)
+    "CA-Los Angeles-Long Beach-Glendale",
+    "CA-Anaheim-Santa Ana-Irvine",
+    # Washington DC (incl. Northern VA and MD suburbs)
+    "DC-MD-Washington",
+    "VA-WV-Arlington-Alexandria-Reston",
+    "MD-Frederick-Gaithersburg-Bethesda",
+    # Boston (incl. Cambridge)
+    "MA-Boston",
+    "MA-Cambridge-Newton-Framingham",
+    # New York (incl. Long Island, Newark, Central NJ)
+    "NY-NJ-New York-Jersey City-White Plains",
+    "NY-Nassau County-Suffolk County",
+    "NJ-Newark",
+    "NJ-Lakewood-New Brunswick",
+    # San Francisco (incl. East Bay)
+    "CA-San Francisco-San Mateo-Redwood City",
+    "CA-Oakland-Fremont-Berkeley",
+    # Chicago
+    "IL-Chicago-Naperville-Schaumburg",
+    "IL-Lake County",
+}
+
+
 def pull_mv_by_type_cbsa(
     client: NCREIFClient, start: int | None, end: int | None
 ) -> pd.DataFrame:
@@ -401,6 +430,9 @@ def pull_mv_by_type_cbsa(
     )
     if df.empty:
         return df
+    df["Market_Tier"] = df["CBSAName"].map(
+        lambda n: "Gateway" if n in GATEWAY_CBSANAMES else "Non-Gateway"
+    )
     df["Share_Pct_of_MV"] = df["MV_at_Share"] / df["MV_100pct"]
     # Each CBSA's share of its property type's MV at share, per quarter.
     df["Pct_of_Type_MV_at_Share"] = df.groupby(["YYYYQ", PT_FIELD])[
@@ -409,6 +441,35 @@ def pull_mv_by_type_cbsa(
     return df.sort_values(
         ["YYYYQ", PT_FIELD, "MV_at_Share"], ascending=[True, True, False]
     ).reset_index(drop=True)
+
+
+def gateway_summary(cbsa_df: pd.DataFrame) -> pd.DataFrame:
+    """Gateway vs Non-Gateway totals per quarter: both MV metrics plus shares."""
+    g = (
+        cbsa_df.groupby(["YYYYQ", "Market_Tier"])[
+            ["MV_at_Share", "MV_100pct", "Prop_Count"]
+        ]
+        .sum()
+        .reset_index()
+    )
+    for col in ("MV_at_Share", "MV_100pct"):
+        g[f"Pct_{col}"] = g.groupby("YYYYQ")[col].transform(lambda s: s / s.sum())
+    return g
+
+
+def gateway_by_type(cbsa_df: pd.DataFrame) -> pd.DataFrame:
+    """Gateway vs Non-Gateway split within each property type, per quarter."""
+    g = (
+        cbsa_df.groupby(["YYYYQ", PT_FIELD, "Market_Tier"])[
+            ["MV_at_Share", "MV_100pct", "Prop_Count"]
+        ]
+        .sum()
+        .reset_index()
+    )
+    g["Pct_of_Type_MV_at_Share"] = g.groupby(["YYYYQ", PT_FIELD])[
+        "MV_at_Share"
+    ].transform(lambda s: s / s.sum())
+    return g
 
 
 def check_band_coverage(main_df: pd.DataFrame, buckets_df: pd.DataFrame) -> pd.DataFrame:
@@ -558,8 +619,28 @@ def main() -> int:
         top = cbsa_df[cbsa_df["YYYYQ"] == q].nlargest(15, "MV_at_Share")
         print(f"\nTop 15 type/CBSA cells by MV at legal share -- {int(q)}\n")
         print(
-            top[[PT_FIELD, "CBSAName", "MV_at_Share", "MV_100pct", "Prop_Count"]]
-            .to_string(index=False)
+            top[[PT_FIELD, "CBSAName", "Market_Tier", "MV_at_Share", "MV_100pct",
+                 "Prop_Count"]].to_string(index=False)
+        )
+
+        gs = gateway_summary(cbsa_df)
+        print(f"\nGateway vs Non-Gateway -- {int(q)}\n")
+        print(
+            gs[gs["YYYYQ"] == q]
+            .set_index("Market_Tier")[
+                ["MV_at_Share", "Pct_MV_at_Share", "MV_100pct", "Pct_MV_100pct",
+                 "Prop_Count"]
+            ]
+            .to_string()
+        )
+
+        gt = gateway_by_type(cbsa_df)
+        print(f"\nGateway share of each property type's MV at legal share -- {int(q)}\n")
+        print(
+            gt[gt["YYYYQ"] == q]
+            .pivot(index=PT_FIELD, columns="Market_Tier",
+                   values="Pct_of_Type_MV_at_Share")
+            .to_string()
         )
 
     # Default to an .xlsx in the working directory; 'none' opts out.
@@ -598,6 +679,12 @@ def main() -> int:
                 ).to_excel(xw, sheet_name="Cohort_Pct_by_Quarter")
             if not cbsa_df.empty:
                 cbsa_df.to_excel(xw, sheet_name="MV_by_Type_CBSA", index=False)
+                gateway_summary(cbsa_df).to_excel(
+                    xw, sheet_name="Gateway_Summary", index=False
+                )
+                gateway_by_type(cbsa_df).to_excel(
+                    xw, sheet_name="Gateway_by_Type", index=False
+                )
             if not raw_df.empty:
                 cols = ["Query"] + [c for c in raw_df.columns if c != "Query"]
                 raw_df[cols].to_excel(xw, sheet_name="Raw_Data", index=False)
