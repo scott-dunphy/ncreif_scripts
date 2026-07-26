@@ -16,8 +16,9 @@ Metrics returned per PropertyType per quarter:
 Universe: DataTypeId=3 (transitioned NPI database), ODCE funds only (FundType='D').
 No NPI_Plus=1 membership flag applied.
 
-Credentials: set NCREIF_EMAIL / NCREIF_PASSWORD at the top of this file, or leave
-them blank to pick up the env vars of the same name.
+Credentials: copy .env.example to .env and fill in NCREIF_EMAIL / NCREIF_PASSWORD.
+The .env file is gitignored. Real environment variables and the constants at the
+top of this file also work -- see the Credentials block below for precedence.
 
 Run with no arguments and it pulls every quarter of DEFAULT_YEAR, including the
 vintage-band breakdown, and writes an .xlsx into the working directory.
@@ -46,12 +47,22 @@ import requests
 # ---------------------------------------------------------------------------
 # Credentials
 #
-# Set these directly if you want, but env vars are safer -- this file is in a
-# git repo, and anything typed here can be committed and pushed by accident.
-# Leave them blank to fall back to NCREIF_EMAIL / NCREIF_PASSWORD.
+# Preferred: put them in a .env file next to this script (it is gitignored, so
+# it never reaches GitHub). Copy .env.example to .env and fill it in:
+#
+#     NCREIF_EMAIL=you@firm.com
+#     NCREIF_PASSWORD=your_password
+#
+# These two constants are a last-resort override. Anything typed here is
+# tracked by git and can be pushed by accident -- leave them blank.
+#
+# Resolution order: constants below -> real environment variables -> .env file.
 # ---------------------------------------------------------------------------
 NCREIF_EMAIL = ""
 NCREIF_PASSWORD = ""
+
+# Where to look for the .env file: alongside this script, then the working dir.
+ENV_FILE = ".env"
 
 # Year pulled when no --year/--start/--end is given. None = current calendar year.
 DEFAULT_YEAR: int | None = None
@@ -173,6 +184,52 @@ def _coerce_numeric(df: pd.DataFrame) -> pd.DataFrame:
         if converted.notna().any():
             df[col] = converted
     return df
+
+
+def load_dotenv(filename: str = ENV_FILE) -> dict[str, str]:
+    """Read a simple KEY=VALUE .env file. No dependency on python-dotenv.
+
+    Looks next to this script first, then in the working directory. Blank lines
+    and #-comments are skipped; surrounding quotes on the value are stripped.
+    Returns an empty dict when no file is found.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    for path in (os.path.join(here, filename), os.path.abspath(filename)):
+        if not os.path.isfile(path):
+            continue
+        values: dict[str, str] = {}
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                val = val.strip()
+                if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+                    val = val[1:-1]
+                values[key.strip()] = val
+        return values
+    return {}
+
+
+def resolve_credentials() -> tuple[str | None, str | None, str]:
+    """Constants win, then real env vars, then the .env file. Also reports source."""
+    dotenv = load_dotenv()
+    email = NCREIF_EMAIL or os.environ.get("NCREIF_EMAIL") or dotenv.get("NCREIF_EMAIL")
+    password = (
+        NCREIF_PASSWORD
+        or os.environ.get("NCREIF_PASSWORD")
+        or dotenv.get("NCREIF_PASSWORD")
+    )
+    if NCREIF_EMAIL or NCREIF_PASSWORD:
+        source = "constants in this file"
+    elif os.environ.get("NCREIF_EMAIL"):
+        source = "environment variables"
+    elif dotenv:
+        source = ENV_FILE
+    else:
+        source = "nowhere"
+    return email, password, source
 
 
 def year_range(year: int) -> tuple[int, int]:
@@ -325,15 +382,15 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    email = NCREIF_EMAIL or os.environ.get("NCREIF_EMAIL")
-    password = NCREIF_PASSWORD or os.environ.get("NCREIF_PASSWORD")
+    email, password, source = resolve_credentials()
     if not email or not password:
         print(
-            "No credentials. Set NCREIF_EMAIL / NCREIF_PASSWORD at the top of this "
-            "file, or export them as env vars.",
+            "No credentials found. Copy .env.example to .env and fill in "
+            "NCREIF_EMAIL and NCREIF_PASSWORD (or export them as env vars).",
             file=sys.stderr,
         )
         return 1
+    print(f"Credentials from: {source}")
 
     client = NCREIFClient(email, password)
 
