@@ -1,17 +1,20 @@
-"""Pull NCREIF ODCE vintage (YrBuiltorRenov) and market value at legal property share,
+"""Pull NCREIF ODCE vintage (YrBuilt) and market value at legal property share,
 grouped by property type.
 
+Note on the vintage field: the transitioned NPI database (DataTypeId=3) exposes
+YrBuilt only -- YrBuiltorRenov and every renovation-year variant probed against the
+live API in Jul 2026 returned a 500 (unknown field). YrBuilt is used throughout.
+
 Metrics returned per PropertyType per quarter:
-  - VW_YrBuiltorRenov         : year built/renovated weighted by market value at 100%
-                                = SUM(YrBuiltorRenov * MV) / SUM(MV)
-  - VW_YrBuiltorRenov_atShare : year built/renovated weighted by market value at legal
-                                property share
-                                = SUM(YrBuiltorRenov * MV * LegalPropertyShare)
-                                  / SUM(MV * LegalPropertyShare)
-  - EW_YrBuiltorRenov         : equal-weighted (simple average) year built or renovated
-  - MV_at_Share               : SUM(MV * LegalPropertyShare)
-  - MV_100pct                 : SUM(MV)
-  - Prop_Count                : property count
+  - VW_YrBuilt         : year built weighted by market value at 100%
+                         = SUM(YrBuilt * MV) / SUM(MV)
+  - VW_YrBuilt_atShare : year built weighted by market value at legal property share
+                         = SUM(YrBuilt * MV * LegalPropertyShare)
+                           / SUM(MV * LegalPropertyShare)
+  - EW_YrBuilt         : equal-weighted (simple average) year built
+  - MV_at_Share        : SUM(MV * LegalPropertyShare)
+  - MV_100pct          : SUM(MV)
+  - Prop_Count         : property count
 
 Universe: DataTypeId=3 (transitioned NPI database), ODCE funds only (FundType='D').
 No NPI_Plus=1 membership flag applied.
@@ -97,19 +100,23 @@ if not VERIFY_SSL:
 
 # ODCE funds and clean vintage/value records only. No NPI_Plus membership filter --
 # this covers all ODCE property-quarters, including those outside the NPI.
+#
+# Every field in WHERE is bracketed. The API silently DROPS the entire WHERE clause
+# when it meets a field name it does not recognize (returning the full 1978+ history
+# unfiltered), and bare YYYYQ breaks the parser outright -- brackets avoid both.
 BASE_WHERE = (
-    "FundType='D' "
-    "AND YrBuiltorRenov Is Not Null AND YrBuiltorRenov > 1800 "
-    "AND MV > 0"
+    "[FundType]='D' "
+    "AND [YrBuilt] Is Not Null AND [YrBuilt] > 1800 "
+    "AND [MV] > 0"
 )
 
 SELECT_MAIN = (
     # Vintage weighted by market value at 100%.
-    "SUM(YrBuiltorRenov*MV)/SUM(MV) AS 'VW_YrBuiltorRenov', "
+    "SUM(YrBuilt*MV)/SUM(MV) AS 'VW_YrBuilt', "
     # Vintage weighted by market value at legal property share.
-    "SUM(YrBuiltorRenov*MV*LegalPropertyShare)/SUM(MV*LegalPropertyShare) "
-    "AS 'VW_YrBuiltorRenov_atShare', "
-    "AVG(YrBuiltorRenov) AS 'EW_YrBuiltorRenov', "
+    "SUM(YrBuilt*MV*LegalPropertyShare)/SUM(MV*LegalPropertyShare) "
+    "AS 'VW_YrBuilt_atShare', "
+    "AVG(YrBuilt) AS 'EW_YrBuilt', "
     "SUM(MV*LegalPropertyShare) AS 'MV_at_Share', "
     "SUM(MV) AS 'MV_100pct', "
     "COUNT(MV) AS 'Prop_Count'"
@@ -293,7 +300,7 @@ def pull_by_property_type(
         return df
 
     df = df.sort_values(["YYYYQ", PT_FIELD]).reset_index(drop=True)
-    for col in ("VW_YrBuiltorRenov", "VW_YrBuiltorRenov_atShare", "EW_YrBuiltorRenov"):
+    for col in ("VW_YrBuilt", "VW_YrBuilt_atShare", "EW_YrBuilt"):
         df[col] = df[col].round(1)
     df["Share_Pct_of_MV"] = df["MV_at_Share"] / df["MV_100pct"]
 
@@ -311,17 +318,17 @@ def pull_vintage_buckets(
 
     Bands are built or renovated within the last 10 years, the 10 years before that,
     and anything older than 20 years. NCREIF has no vintage-bucket field, so bucket by
-    [Year]-[YrBuiltorRenov] with one query per band and stack the results.
+    [Year]-[YrBuilt] with one query per band and stack the results.
     """
     # Mutually exclusive and collectively exhaustive: every property-quarter with a
-    # valid YrBuiltorRenov lands in exactly one band. Age is measured against the
+    # valid YrBuilt lands in exactly one band. Age is measured against the
     # observation [Year], not today, so the bands stay correct in back-history.
     # The <= 9 band also absorbs any negative age (renovation year ahead of the
     # observation year), which would otherwise fall through all three.
     bands = [
-        ("1_Last 10 yrs", "[Year]-[YrBuiltorRenov] <= 9"),
-        ("2_Prior 10 yrs", "[Year]-[YrBuiltorRenov] BETWEEN 10 AND 19"),
-        ("3_Over 20 yrs", "[Year]-[YrBuiltorRenov] >= 20"),
+        ("1_Last 10 yrs", "[Year]-[YrBuilt] <= 9"),
+        ("2_Prior 10 yrs", "[Year]-[YrBuilt] BETWEEN 10 AND 19"),
+        ("3_Over 20 yrs", "[Year]-[YrBuilt] >= 20"),
     ]
     frames = []
     for label, clause in bands:
@@ -369,9 +376,9 @@ def latest_quarter_pivot(df: pd.DataFrame) -> pd.DataFrame:
     snap = df[df["YYYYQ"] == q].set_index(PT_FIELD)
     return snap[
         [
-            "VW_YrBuiltorRenov",
-            "VW_YrBuiltorRenov_atShare",
-            "EW_YrBuiltorRenov",
+            "VW_YrBuilt",
+            "VW_YrBuilt_atShare",
+            "EW_YrBuilt",
             "MV_at_Share",
             "MV_100pct",
             "Prop_Count",
