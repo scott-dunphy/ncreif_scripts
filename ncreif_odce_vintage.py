@@ -17,8 +17,8 @@ Metrics returned per PropertyType per quarter (VINTAGE = YrBuiltorLastRen):
   - MV_100pct             : SUM(MV)
   - Prop_Count            : property count
 
-Universe: DataTypeId=3 (transitioned NPI database), ODCE funds only (FundType='D').
-No NPI_Plus=1 membership flag applied.
+Universe: DataTypeId=3 (transitioned NPI database), NPI members (NPI_Plus=1) held
+in ODCE funds (FundType='D').
 
 Credentials: copy .env.example to .env and fill in NCREIF_EMAIL / NCREIF_PASSWORD.
 The .env file is gitignored. Real environment variables and the constants at the
@@ -103,14 +103,13 @@ if not VERIFY_SSL:
 # YrBuilt = original construction year only. Both exist in DataTypeId=3.
 VINTAGE = "YrBuiltorLastRen"
 
-# ODCE funds and clean vintage/value records only. No NPI_Plus membership filter --
-# this covers all ODCE property-quarters, including those outside the NPI.
+# NPI members held in ODCE funds, with clean vintage/value records only.
 #
 # Every field in WHERE is bracketed. The API silently DROPS the entire WHERE clause
 # when it meets a field name it does not recognize (returning the full 1978+ history
 # unfiltered), and bare YYYYQ breaks the parser outright -- brackets avoid both.
 BASE_WHERE = (
-    "[FundType]='D' "
+    "[NPI_Plus]=1 AND [FundType]='D' "
     f"AND [{VINTAGE}] Is Not Null AND [{VINTAGE}] > 1800 "
     "AND [MV] > 0"
 )
