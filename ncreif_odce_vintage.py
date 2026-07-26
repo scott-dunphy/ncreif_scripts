@@ -16,10 +16,11 @@ Metrics returned per PropertyType per quarter:
 Universe: DataTypeId=3 (transitioned NPI database), ODCE funds only (FundType='D').
 No NPI_Plus=1 membership flag applied.
 
-Credentials come from env vars NCREIF_EMAIL / NCREIF_PASSWORD.
+Credentials: set NCREIF_EMAIL / NCREIF_PASSWORD at the top of this file, or leave
+them blank to pick up the env vars of the same name.
 
 Usage:
-    export NCREIF_EMAIL=you@firm.com
+    export NCREIF_EMAIL=you@firm.com        # optional if set in the file
     export NCREIF_PASSWORD='...'
     python ncreif_odce_vintage.py                       # latest 4 quarters
     python ncreif_odce_vintage.py --start 20241 --end 20261
@@ -36,6 +37,16 @@ import time
 
 import pandas as pd
 import requests
+
+# ---------------------------------------------------------------------------
+# Credentials
+#
+# Set these directly if you want, but env vars are safer -- this file is in a
+# git repo, and anything typed here can be committed and pushed by accident.
+# Leave them blank to fall back to NCREIF_EMAIL / NCREIF_PASSWORD.
+# ---------------------------------------------------------------------------
+NCREIF_EMAIL = ""
+NCREIF_PASSWORD = ""
 
 BASE_URL = "https://qt-api.ncreif.org"
 DATA_TYPE_ID = 3  # transitioned NPI (the official NPI as of 2026Q1)
@@ -249,10 +260,14 @@ def main() -> int:
     ap.add_argument("--out", default=None, help="write results to .xlsx or .csv")
     args = ap.parse_args()
 
-    email = os.environ.get("NCREIF_EMAIL")
-    password = os.environ.get("NCREIF_PASSWORD")
+    email = NCREIF_EMAIL or os.environ.get("NCREIF_EMAIL")
+    password = NCREIF_PASSWORD or os.environ.get("NCREIF_PASSWORD")
     if not email or not password:
-        print("Set NCREIF_EMAIL and NCREIF_PASSWORD env vars.", file=sys.stderr)
+        print(
+            "No credentials. Set NCREIF_EMAIL / NCREIF_PASSWORD at the top of this "
+            "file, or export them as env vars.",
+            file=sys.stderr,
+        )
         return 1
 
     client = NCREIFClient(email, password)
