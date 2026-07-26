@@ -380,6 +380,37 @@ def pull_banded(
     return out.sort_values(["YYYYQ", PT_FIELD, "Vintage_Band"]).reset_index(drop=True)
 
 
+def pull_mv_by_type_cbsa(
+    client: NCREIFClient, start: int | None, end: int | None
+) -> pd.DataFrame:
+    """MV at 100% and at legal share by property type and CBSA name, per quarter.
+
+    Masking bites hard at this grain -- a type/CBSA cell below 3 properties from
+    3 managers is suppressed by the API, so totals here will undershoot the
+    by-property-type totals. That is data availability, not a bug.
+    """
+    df = client.query(
+        select=(
+            "SUM(MV*LegalPropertyShare) AS 'MV_at_Share', "
+            "SUM(MV) AS 'MV_100pct', "
+            "COUNT(MV) AS 'Prop_Count'"
+        ),
+        where=BASE_WHERE + period_clause(start, end),
+        groupby=f"[Year],[YYYYQ],[{PT_FIELD}],[CBSAName]",
+        label="mv_by_type_cbsa",
+    )
+    if df.empty:
+        return df
+    df["Share_Pct_of_MV"] = df["MV_at_Share"] / df["MV_100pct"]
+    # Each CBSA's share of its property type's MV at share, per quarter.
+    df["Pct_of_Type_MV_at_Share"] = df.groupby(["YYYYQ", PT_FIELD])[
+        "MV_at_Share"
+    ].transform(lambda s: s / s.sum())
+    return df.sort_values(
+        ["YYYYQ", PT_FIELD, "MV_at_Share"], ascending=[True, True, False]
+    ).reset_index(drop=True)
+
+
 def check_band_coverage(main_df: pd.DataFrame, buckets_df: pd.DataFrame) -> pd.DataFrame:
     """Verify the bands partition the universe -- no overlap, nothing dropped.
 
@@ -521,6 +552,16 @@ def main() -> int:
         if not cohorts_df.empty:
             show_banded(cohorts_df, "vintage cohort")
 
+    cbsa_df = pull_mv_by_type_cbsa(client, start, end)
+    if not cbsa_df.empty:
+        q = cbsa_df["YYYYQ"].max()
+        top = cbsa_df[cbsa_df["YYYYQ"] == q].nlargest(15, "MV_at_Share")
+        print(f"\nTop 15 type/CBSA cells by MV at legal share -- {int(q)}\n")
+        print(
+            top[[PT_FIELD, "CBSAName", "MV_at_Share", "MV_100pct", "Prop_Count"]]
+            .to_string(index=False)
+        )
+
     # Default to an .xlsx in the working directory; 'none' opts out.
     out = args.out
     if out is None:
@@ -555,6 +596,8 @@ def main() -> int:
                     columns="Vintage_Band",
                     values="Pct_of_Type_MV_at_Share",
                 ).to_excel(xw, sheet_name="Cohort_Pct_by_Quarter")
+            if not cbsa_df.empty:
+                cbsa_df.to_excel(xw, sheet_name="MV_by_Type_CBSA", index=False)
             if not raw_df.empty:
                 cols = ["Query"] + [c for c in raw_df.columns if c != "Query"]
                 raw_df[cols].to_excel(xw, sheet_name="Raw_Data", index=False)
