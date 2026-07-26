@@ -126,9 +126,9 @@ SELECT_MAIN = (
     "COUNT(MV) AS 'Prop_Count'"
 )
 
-# NCREIF's own loaded templates use the Exp_-prefixed type field; it carries the same
-# full-name values ('Residential', 'Industrial', 'Office', ...).
-PT_FIELD = "Exp_PropertyType"
+# Full-name values ('Residential', 'Industrial', 'Office', ...). Exp_PropertyType
+# also exists and carries the same values.
+PT_FIELD = "PropertyType"
 
 GROUPBY_MAIN = f"[Year],[YYYYQ],[{PT_FIELD}]"
 
