@@ -328,7 +328,7 @@ def pull_by_property_type(
 # year), which would otherwise fall through all three.
 AGE_BANDS = [
     ("1_Last 10 yrs", f"[Year]-[{VINTAGE}] <= 9"),
-    ("2_Prior 10 yrs", f"[Year]-[{VINTAGE}] BETWEEN 10 AND 19"),
+    ("2_Prior 10 yrs", f"[Year]-[{VINTAGE}] >= 10 AND [Year]-[{VINTAGE}] <= 19"),
     ("3_Over 20 yrs", f"[Year]-[{VINTAGE}] >= 20"),
 ]
 
@@ -336,7 +336,7 @@ AGE_BANDS = [
 # observation quarter. BASE_WHERE's > 1800 floor keeps junk years out of Pre-2005.
 YEAR_COHORTS = [
     ("1_2015 or newer", f"[{VINTAGE}] >= 2015"),
-    ("2_2005-2014", f"[{VINTAGE}] BETWEEN 2005 AND 2014"),
+    ("2_2005-2014", f"[{VINTAGE}] >= 2005 AND [{VINTAGE}] <= 2014"),
     ("3_Pre-2005", f"[{VINTAGE}] < 2005"),
 ]
 
