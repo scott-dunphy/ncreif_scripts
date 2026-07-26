@@ -75,6 +75,26 @@ MAX_YEAR_FALLBACK = 2
 BASE_URL = "https://qt-api.ncreif.org"
 DATA_TYPE_ID = 3  # transitioned NPI (the official NPI as of 2026Q1)
 
+# ---------------------------------------------------------------------------
+# TLS verification
+#
+# False skips certificate validation, which is what you want behind a corporate
+# proxy that re-signs traffic (Zscaler, Netskope, Blue Coat) and otherwise
+# throws SSLCertVerificationError.
+#
+# Note this turns off MITM protection on the login call that carries the
+# password. The verifying alternative, if IT can give you the proxy's root CA:
+#     export REQUESTS_CA_BUNDLE=/path/to/corporate-root-ca.pem
+# then set this back to True.
+# ---------------------------------------------------------------------------
+VERIFY_SSL = False
+
+if not VERIFY_SSL:
+    # urllib3 warns on every unverified request; one notice at startup is enough.
+    import urllib3
+
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 # ODCE funds and clean vintage/value records only. No NPI_Plus membership filter --
 # this covers all ODCE property-quarters, including those outside the NPI.
 BASE_WHERE = (
@@ -111,6 +131,8 @@ class NCREIFClient:
         self.pause = pause  # be polite: ~8 queries/min
         self.token: str | None = None
         self.session = requests.Session()
+        # Applies to every request made through this session.
+        self.session.verify = VERIFY_SSL
         self._last_call = 0.0
 
     def login(self) -> None:
@@ -391,6 +413,8 @@ def main() -> int:
         )
         return 1
     print(f"Credentials from: {source}")
+    if not VERIFY_SSL:
+        print("TLS certificate verification is OFF (VERIFY_SSL = False).")
 
     client = NCREIFClient(email, password)
 
