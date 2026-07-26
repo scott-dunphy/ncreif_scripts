@@ -323,25 +323,37 @@ def pull_by_property_type(
     return df
 
 
-def pull_vintage_buckets(
-    client: NCREIFClient, start: int | None, end: int | None
-) -> pd.DataFrame:
-    """Market value at legal share distributed across three age bands.
+# Rolling age bands: age measured against the observation [Year], so back-history
+# classifies correctly. Mutually exclusive and collectively exhaustive; the <= 9
+# band also absorbs any negative age (renovation year ahead of the observation
+# year), which would otherwise fall through all three.
+AGE_BANDS = [
+    ("1_Last 10 yrs", f"[Year]-[{VINTAGE}] <= 9"),
+    ("2_Prior 10 yrs", f"[Year]-[{VINTAGE}] BETWEEN 10 AND 19"),
+    ("3_Over 20 yrs", f"[Year]-[{VINTAGE}] >= 20"),
+]
 
-    Bands are built or renovated within the last 10 years, the 10 years before that,
-    and anything older than 20 years. NCREIF has no vintage-bucket field, so bucket by
-    [Year]-[VINTAGE] with one query per band and stack the results.
+# Fixed calendar cohorts on the vintage year itself. Same-year cutoffs regardless of
+# observation quarter. BASE_WHERE's > 1800 floor keeps junk years out of Pre-2005.
+YEAR_COHORTS = [
+    ("1_2015 or newer", f"[{VINTAGE}] >= 2015"),
+    ("2_2005-2014", f"[{VINTAGE}] BETWEEN 2005 AND 2014"),
+    ("3_Pre-2005", f"[{VINTAGE}] < 2005"),
+]
+
+
+def pull_banded(
+    client: NCREIFClient,
+    start: int | None,
+    end: int | None,
+    bands: list[tuple[str, str]],
+    tag: str,
+) -> pd.DataFrame:
+    """Market value at legal share split across a set of vintage bands.
+
+    NCREIF has no bucket field, so run one query per band and stack the results.
+    Band definitions must be mutually exclusive and collectively exhaustive.
     """
-    # Mutually exclusive and collectively exhaustive: every property-quarter with a
-    # valid vintage year lands in exactly one band. Age is measured against the
-    # observation [Year], not today, so the bands stay correct in back-history.
-    # The <= 9 band also absorbs any negative age (renovation year ahead of the
-    # observation year), which would otherwise fall through all three.
-    bands = [
-        ("1_Last 10 yrs", f"[Year]-[{VINTAGE}] <= 9"),
-        ("2_Prior 10 yrs", f"[Year]-[{VINTAGE}] BETWEEN 10 AND 19"),
-        ("3_Over 20 yrs", f"[Year]-[{VINTAGE}] >= 20"),
-    ]
     frames = []
     for label, clause in bands:
         part = client.query(
@@ -352,7 +364,7 @@ def pull_vintage_buckets(
             ),
             where=f"{BASE_WHERE}{period_clause(start, end)} AND {clause}",
             groupby=GROUPBY_MAIN,
-            label=f"band_{label}",
+            label=f"{tag}_{label}",
         )
         if part.empty:
             continue
@@ -474,34 +486,41 @@ def main() -> int:
           f"{int(main_df['YYYYQ'].max())}\n")
     print(latest_quarter_pivot(main_df).to_string())
 
-    buckets_df = pd.DataFrame()
-    if args.buckets:
-        buckets_df = pull_vintage_buckets(client, start, end)
-        if not buckets_df.empty:
-            q = buckets_df["YYYYQ"].max()
-            snap = buckets_df[buckets_df["YYYYQ"] == q]
-            print(f"\nShare of MV at legal share by vintage band -- {int(q)}\n")
+    def show_banded(df: pd.DataFrame, title: str) -> None:
+        q = df["YYYYQ"].max()
+        snap = df[df["YYYYQ"] == q]
+        print(f"\nShare of MV at legal share by {title} -- {int(q)}\n")
+        print(
+            snap.pivot(
+                index=PT_FIELD,
+                columns="Vintage_Band",
+                values="Pct_of_Type_MV_at_Share",
+            ).to_string()
+        )
+        print(f"\nMV at legal share by {title} -- {int(q)}\n")
+        print(
+            snap.pivot(
+                index=PT_FIELD, columns="Vintage_Band", values="MV_at_Share"
+            ).to_string()
+        )
+        gaps = check_band_coverage(main_df, df)
+        if not gaps.empty:
             print(
-                snap.pivot(
-                    index=PT_FIELD,
-                    columns="Vintage_Band",
-                    values="Pct_of_Type_MV_at_Share",
-                ).to_string()
+                f"\nWARNING: {title} counts do not reconcile to the unbanded total "
+                "(masking may suppress small bands):\n"
             )
-            print(f"\nMV at legal share by vintage band -- {int(q)}\n")
-            print(
-                snap.pivot(
-                    index=PT_FIELD, columns="Vintage_Band", values="MV_at_Share"
-                ).to_string()
-            )
+            print(gaps.to_string(index=False))
 
-            gaps = check_band_coverage(main_df, buckets_df)
-            if not gaps.empty:
-                print(
-                    "\nWARNING: band counts do not reconcile to the unbanded total "
-                    "(masking may suppress small bands):\n"
-                )
-                print(gaps.to_string(index=False))
+    buckets_df = pd.DataFrame()
+    cohorts_df = pd.DataFrame()
+    if args.buckets:
+        buckets_df = pull_banded(client, start, end, AGE_BANDS, tag="age")
+        if not buckets_df.empty:
+            show_banded(buckets_df, "age band")
+
+        cohorts_df = pull_banded(client, start, end, YEAR_COHORTS, tag="cohort")
+        if not cohorts_df.empty:
+            show_banded(cohorts_df, "vintage cohort")
 
     # Default to an .xlsx in the working directory; 'none' opts out.
     out = args.out
@@ -524,12 +543,19 @@ def main() -> int:
             latest_quarter_pivot(main_df).to_excel(xw, sheet_name="Latest_Snapshot")
             main_df.to_excel(xw, sheet_name="By_PropertyType", index=False)
             if not buckets_df.empty:
-                buckets_df.to_excel(xw, sheet_name="Vintage_Bands", index=False)
+                buckets_df.to_excel(xw, sheet_name="Age_Bands", index=False)
                 buckets_df.pivot_table(
                     index=[PT_FIELD, "YYYYQ"],
                     columns="Vintage_Band",
                     values="Pct_of_Type_MV_at_Share",
-                ).to_excel(xw, sheet_name="Band_Pct_by_Quarter")
+                ).to_excel(xw, sheet_name="AgeBand_Pct_by_Quarter")
+            if not cohorts_df.empty:
+                cohorts_df.to_excel(xw, sheet_name="Vintage_Cohorts", index=False)
+                cohorts_df.pivot_table(
+                    index=[PT_FIELD, "YYYYQ"],
+                    columns="Vintage_Band",
+                    values="Pct_of_Type_MV_at_Share",
+                ).to_excel(xw, sheet_name="Cohort_Pct_by_Quarter")
             if not raw_df.empty:
                 cols = ["Query"] + [c for c in raw_df.columns if c != "Query"]
                 raw_df[cols].to_excel(xw, sheet_name="Raw_Data", index=False)
