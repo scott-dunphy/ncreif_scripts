@@ -2,12 +2,16 @@
 grouped by property type.
 
 Metrics returned per PropertyType per quarter:
-  - VW_YrBuiltorRenov : market-value-weighted average year built or renovated
-                        = SUM(YrBuiltorRenov * MV) / SUM(MV)
-  - EW_YrBuiltorRenov : equal-weighted (simple average) year built or renovated
-  - MV_at_Share       : SUM(MV * LegalPropertyShare)  -- market value at legal share
-  - MV_100pct         : SUM(MV)                       -- market value at 100%
-  - Prop_Count        : property count
+  - VW_YrBuiltorRenov         : year built/renovated weighted by market value at 100%
+                                = SUM(YrBuiltorRenov * MV) / SUM(MV)
+  - VW_YrBuiltorRenov_atShare : year built/renovated weighted by market value at legal
+                                property share
+                                = SUM(YrBuiltorRenov * MV * LegalPropertyShare)
+                                  / SUM(MV * LegalPropertyShare)
+  - EW_YrBuiltorRenov         : equal-weighted (simple average) year built or renovated
+  - MV_at_Share               : SUM(MV * LegalPropertyShare)
+  - MV_100pct                 : SUM(MV)
+  - Prop_Count                : property count
 
 Universe: DataTypeId=3 (transitioned NPI database), ODCE funds only (FundType='D').
 No NPI_Plus=1 membership flag applied.
@@ -45,7 +49,11 @@ BASE_WHERE = (
 )
 
 SELECT_MAIN = (
+    # Vintage weighted by market value at 100%.
     "SUM(YrBuiltorRenov*MV)/SUM(MV) AS 'VW_YrBuiltorRenov', "
+    # Vintage weighted by market value at legal property share.
+    "SUM(YrBuiltorRenov*MV*LegalPropertyShare)/SUM(MV*LegalPropertyShare) "
+    "AS 'VW_YrBuiltorRenov_atShare', "
     "AVG(YrBuiltorRenov) AS 'EW_YrBuiltorRenov', "
     "SUM(MV*LegalPropertyShare) AS 'MV_at_Share', "
     "SUM(MV) AS 'MV_100pct', "
@@ -165,8 +173,8 @@ def pull_by_property_type(
         return df
 
     df = df.sort_values(["YYYYQ", PT_FIELD]).reset_index(drop=True)
-    df["VW_YrBuiltorRenov"] = df["VW_YrBuiltorRenov"].round(1)
-    df["EW_YrBuiltorRenov"] = df["EW_YrBuiltorRenov"].round(1)
+    for col in ("VW_YrBuiltorRenov", "VW_YrBuiltorRenov_atShare", "EW_YrBuiltorRenov"):
+        df[col] = df[col].round(1)
     df["Share_Pct_of_MV"] = df["MV_at_Share"] / df["MV_100pct"]
 
     # Each quarter's MV-at-share mix across property types.
@@ -223,6 +231,7 @@ def latest_quarter_pivot(df: pd.DataFrame) -> pd.DataFrame:
     return snap[
         [
             "VW_YrBuiltorRenov",
+            "VW_YrBuiltorRenov_atShare",
             "EW_YrBuiltorRenov",
             "MV_at_Share",
             "MV_100pct",
