@@ -19,18 +19,23 @@ No NPI_Plus=1 membership flag applied.
 Credentials: set NCREIF_EMAIL / NCREIF_PASSWORD at the top of this file, or leave
 them blank to pick up the env vars of the same name.
 
+Run with no arguments and it pulls every quarter of DEFAULT_YEAR, including the
+vintage-band breakdown, and writes an .xlsx into the working directory.
+
 Usage:
     export NCREIF_EMAIL=you@firm.com        # optional if set in the file
     export NCREIF_PASSWORD='...'
-    python ncreif_odce_vintage.py                       # latest 4 quarters
-    python ncreif_odce_vintage.py --start 20241 --end 20261
-    python ncreif_odce_vintage.py --buckets             # add vintage-decade breakdown
-    python ncreif_odce_vintage.py --out odce_vintage.xlsx
+    python ncreif_odce_vintage.py                   # all quarters of DEFAULT_YEAR -> .xlsx
+    python ncreif_odce_vintage.py --year 2024       # all quarters of 2024
+    python ncreif_odce_vintage.py --start 20241 --end 20261   # explicit range
+    python ncreif_odce_vintage.py --no-buckets      # skip the vintage-band queries
+    python ncreif_odce_vintage.py --out custom.xlsx # override the output filename
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import os
 import sys
 import time
@@ -47,6 +52,14 @@ import requests
 # ---------------------------------------------------------------------------
 NCREIF_EMAIL = ""
 NCREIF_PASSWORD = ""
+
+# Year pulled when no --year/--start/--end is given. None = current calendar year.
+DEFAULT_YEAR: int | None = None
+
+# How many years to walk back looking for data before giving up. NCREIF freezes a
+# quarter well after it ends, so early in a calendar year the current year is often
+# still empty.
+MAX_YEAR_FALLBACK = 2
 
 BASE_URL = "https://qt-api.ncreif.org"
 DATA_TYPE_ID = 3  # transitioned NPI (the official NPI as of 2026Q1)
@@ -162,6 +175,23 @@ def _coerce_numeric(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def year_range(year: int) -> tuple[int, int]:
+    """All four quarters of a calendar year as YYYYQ bounds: 2025 -> (20251, 20254)."""
+    return year * 10 + 1, year * 10 + 4
+
+
+def report_quarter_coverage(df: pd.DataFrame, year: int) -> None:
+    """Say which quarters of the year actually came back, and which did not."""
+    got = sorted(int(q) for q in df["YYYYQ"].unique())
+    missing = [year * 10 + q for q in (1, 2, 3, 4) if year * 10 + q not in got]
+    print(f"Quarters returned: {', '.join(str(q) for q in got)}")
+    if missing:
+        print(
+            "Not available (likely not yet frozen/released): "
+            + ", ".join(str(q) for q in missing)
+        )
+
+
 def period_clause(start: int | None, end: int | None) -> str:
     parts = []
     if start is not None:
@@ -198,17 +228,21 @@ def pull_by_property_type(
 def pull_vintage_buckets(
     client: NCREIFClient, start: int | None, end: int | None
 ) -> pd.DataFrame:
-    """Market value at legal share distributed across vintage-decade buckets.
+    """Market value at legal share distributed across three age bands.
 
-    NCREIF has no vintage-bucket field, so bucket by [Year]-[YrBuiltorRenov] age bands
-    with one query per band and stack the results.
+    Bands are built or renovated within the last 10 years, the 10 years before that,
+    and anything older than 20 years. NCREIF has no vintage-bucket field, so bucket by
+    [Year]-[YrBuiltorRenov] with one query per band and stack the results.
     """
+    # Mutually exclusive and collectively exhaustive: every property-quarter with a
+    # valid YrBuiltorRenov lands in exactly one band. Age is measured against the
+    # observation [Year], not today, so the bands stay correct in back-history.
+    # The <= 9 band also absorbs any negative age (renovation year ahead of the
+    # observation year), which would otherwise fall through all three.
     bands = [
-        ("0-4 yrs", "[Year]-[YrBuiltorRenov] <= 4"),
-        ("5-9 yrs", "[Year]-[YrBuiltorRenov] BETWEEN 5 AND 9"),
-        ("10-19 yrs", "[Year]-[YrBuiltorRenov] BETWEEN 10 AND 19"),
-        ("20-29 yrs", "[Year]-[YrBuiltorRenov] BETWEEN 20 AND 29"),
-        ("30+ yrs", "[Year]-[YrBuiltorRenov] >= 30"),
+        ("1_Last 10 yrs", "[Year]-[YrBuiltorRenov] <= 9"),
+        ("2_Prior 10 yrs", "[Year]-[YrBuiltorRenov] BETWEEN 10 AND 19"),
+        ("3_Over 20 yrs", "[Year]-[YrBuiltorRenov] >= 20"),
     ]
     frames = []
     for label, clause in bands:
@@ -236,6 +270,21 @@ def pull_vintage_buckets(
     return out.sort_values(["YYYYQ", PT_FIELD, "Vintage_Band"]).reset_index(drop=True)
 
 
+def check_band_coverage(main_df: pd.DataFrame, buckets_df: pd.DataFrame) -> pd.DataFrame:
+    """Verify the bands partition the universe -- no overlap, nothing dropped.
+
+    Sums each band's property count per quarter/type and compares against the
+    unbanded total. A positive gap means properties fell through the bands; a
+    negative gap means a property was counted in more than one band.
+    """
+    keys = ["YYYYQ", PT_FIELD]
+    banded = buckets_df.groupby(keys)["Prop_Count"].sum().rename("Banded_Props")
+    total = main_df.set_index(keys)["Prop_Count"].rename("Total_Props")
+    cmp = pd.concat([total, banded], axis=1).fillna(0)
+    cmp["Gap"] = cmp["Total_Props"] - cmp["Banded_Props"]
+    return cmp[cmp["Gap"] != 0].reset_index()
+
+
 def latest_quarter_pivot(df: pd.DataFrame) -> pd.DataFrame:
     q = df["YYYYQ"].max()
     snap = df[df["YYYYQ"] == q].set_index(PT_FIELD)
@@ -254,10 +303,26 @@ def latest_quarter_pivot(df: pd.DataFrame) -> pd.DataFrame:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--year",
+        type=int,
+        default=None,
+        help="calendar year to pull, all four quarters (default: DEFAULT_YEAR)",
+    )
     ap.add_argument("--start", type=int, default=None, help="start YYYYQ, e.g. 20241")
     ap.add_argument("--end", type=int, default=None, help="end YYYYQ, e.g. 20261")
-    ap.add_argument("--buckets", action="store_true", help="add vintage-band breakdown")
-    ap.add_argument("--out", default=None, help="write results to .xlsx or .csv")
+    ap.add_argument(
+        "--no-buckets",
+        dest="buckets",
+        action="store_false",
+        help="skip the vintage-band breakdown (on by default)",
+    )
+    ap.add_argument(
+        "--out",
+        default=None,
+        help="output path; defaults to ncreif_odce_vintage_<year>.xlsx in the "
+             "working directory. Pass 'none' to skip writing a file.",
+    )
     args = ap.parse_args()
 
     email = NCREIF_EMAIL or os.environ.get("NCREIF_EMAIL")
@@ -271,10 +336,36 @@ def main() -> int:
         return 1
 
     client = NCREIFClient(email, password)
-    main_df = pull_by_property_type(client, args.start, args.end)
+
+    # An explicit --start/--end wins; otherwise pull a full calendar year, walking
+    # back a year at a time if the requested one has not been released yet.
+    explicit_range = args.start is not None or args.end is not None
+    if explicit_range:
+        year = None
+        start, end = args.start, args.end
+        main_df = pull_by_property_type(client, start, end)
+    else:
+        year = args.year or DEFAULT_YEAR or dt.date.today().year
+        for attempt in range(MAX_YEAR_FALLBACK + 1):
+            start, end = year_range(year)
+            print(f"Pulling all quarters of {year} ({start}-{end}) ...")
+            main_df = pull_by_property_type(client, start, end)
+            if not main_df.empty:
+                break
+            if attempt < MAX_YEAR_FALLBACK:
+                year -= 1
+                print(f"  no data; falling back to {year}")
+
     if main_df.empty:
-        print("No rows returned -- check the period filter or masking (>=3 props, >=3 managers).")
+        print(
+            "No rows returned -- check the period filter, credentials, or masking "
+            "(>=3 properties from >=3 managers).",
+            file=sys.stderr,
+        )
         return 2
+
+    if year is not None:
+        report_quarter_coverage(main_df, year)
 
     pd.set_option("display.width", 160)
     pd.set_option("display.float_format", lambda v: f"{v:,.4f}")
@@ -284,29 +375,56 @@ def main() -> int:
 
     buckets_df = pd.DataFrame()
     if args.buckets:
-        buckets_df = pull_vintage_buckets(client, args.start, args.end)
+        buckets_df = pull_vintage_buckets(client, start, end)
         if not buckets_df.empty:
             q = buckets_df["YYYYQ"].max()
-            print(f"\nMV at legal share by vintage band -- {int(q)}\n")
+            snap = buckets_df[buckets_df["YYYYQ"] == q]
+            print(f"\nShare of MV at legal share by vintage band -- {int(q)}\n")
             print(
-                buckets_df[buckets_df["YYYYQ"] == q]
-                .pivot(
+                snap.pivot(
                     index=PT_FIELD,
                     columns="Vintage_Band",
                     values="Pct_of_Type_MV_at_Share",
-                )
-                .to_string()
+                ).to_string()
+            )
+            print(f"\nMV at legal share by vintage band -- {int(q)}\n")
+            print(
+                snap.pivot(
+                    index=PT_FIELD, columns="Vintage_Band", values="MV_at_Share"
+                ).to_string()
             )
 
-    if args.out:
-        if args.out.endswith(".xlsx"):
-            with pd.ExcelWriter(args.out, engine="openpyxl") as xw:
-                main_df.to_excel(xw, sheet_name="By_PropertyType", index=False)
-                if not buckets_df.empty:
-                    buckets_df.to_excel(xw, sheet_name="Vintage_Bands", index=False)
-        else:
-            main_df.to_csv(args.out, index=False)
-        print(f"\nWrote {args.out}")
+            gaps = check_band_coverage(main_df, buckets_df)
+            if not gaps.empty:
+                print(
+                    "\nWARNING: band counts do not reconcile to the unbanded total "
+                    "(masking may suppress small bands):\n"
+                )
+                print(gaps.to_string(index=False))
+
+    # Default to an .xlsx in the working directory; 'none' opts out.
+    out = args.out
+    if out is None:
+        tag = str(year) if year is not None else f"{start}_{end}"
+        out = f"ncreif_odce_vintage_{tag}.xlsx"
+    if out.lower() == "none":
+        return 0
+
+    out_path = os.path.abspath(out)
+    if out.endswith(".xlsx"):
+        with pd.ExcelWriter(out_path, engine="openpyxl") as xw:
+            latest_quarter_pivot(main_df).to_excel(xw, sheet_name="Latest_Snapshot")
+            main_df.to_excel(xw, sheet_name="By_PropertyType", index=False)
+            if not buckets_df.empty:
+                buckets_df.to_excel(xw, sheet_name="Vintage_Bands", index=False)
+                buckets_df.pivot_table(
+                    index=[PT_FIELD, "YYYYQ"],
+                    columns="Vintage_Band",
+                    values="Pct_of_Type_MV_at_Share",
+                ).to_excel(xw, sheet_name="Band_Pct_by_Quarter")
+    else:
+        main_df.to_csv(out_path, index=False)
+    print(f"\nWrote {out_path}")
 
     return 0
 
